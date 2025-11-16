@@ -23,9 +23,9 @@ pipeline {
  bat "xcopy /Y index.html ${DEPLOY_DIR}\\"
  }
  }
- stage('Run HTTP Server (Optional Test)') {
+ stage('Run HTTPS Server (Optional Test)') {
  steps {
- echo 'Skipping HTTP server (use IIS instead)'
+ echo 'Skipping HTTPS server (use IIS instead)'
  // For testing, you can use: bat 'python -m http.server 8000'
  }
  }
@@ -39,3 +39,4 @@ pipeline {
  }
  }
 }
+
