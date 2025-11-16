@@ -1,126 +1,140 @@
 pipeline {
-  agent any
+    agent any
 
-  environment {
-    DEPLOY_DIR = 'C:\\inetpub\\wwwroot'    // IIS web root folder
-    GIT_CREDS  = 'github-pat'           // your credentials ID in Jenkins
-  }
-
-  stages {
-    stage('Checkout') {
-      steps {
-        echo "Cloning project from GitHub with credentialsId=${env.GIT_CREDS}"
-        git branch: 'master',
-            url: 'https://github.com/Subit418/isepractice.git',
-            credentialsId: "${env.GIT_CREDS}"
-      }
+    environment {
+        // change or remove if you want this configurable
+        APP_PORT = '7070'
     }
 
-    stage('Build - list workspace') {
-      steps {
-        bat """
-          echo ===== Workspace: %WORKSPACE% =====
-          echo User: %USERNAME%
-          echo ---- Root files ----
-          dir "%WORKSPACE%" /A
-          echo ---- assets (if present) ----
-          if exist "%WORKSPACE%\\assets" dir "%WORKSPACE%\\assets"
-          echo ---- deploy.ps1 presence ----
-          if exist "%WORKSPACE%\\deploy.ps1" ( echo deploy.ps1 FOUND ) else ( echo deploy.ps1 NOT FOUND )
-        """
-      }
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Cloning repository from GitHub...'
+                git url: 'https://github.com/Subit418/isepractice.git', branch: 'master'
+            }
+        }
+
+        stage('Detect & Build') {
+            steps {
+                script {
+                    if (fileExists('pom.xml')) {
+                        echo "Maven project detected (pom.xml). Building with Maven..."
+                        bat 'mvn -B clean package'
+                    } else if (fileExists('gradlew') || fileExists('build.gradle')) {
+                        echo "Gradle project detected. Building with Gradle..."
+                        if (fileExists('gradlew')) {
+                            // ensure gradlew is executable on non-Windows agents (harmless on Windows)
+                            bat 'chmod +x gradlew || echo skipped chmod'
+                            bat '.\\gradlew clean build'
+                        } else {
+                            bat 'gradle clean build'
+                        }
+                    } else if (fileExists('package.json')) {
+                        echo "Node project detected (package.json). Installing dependencies and building..."
+                        bat 'npm install'
+                        // if package.json contains a build script, run it; harmless if it doesn't exist
+                        bat 'npm run build || echo "no build script or build failed (continuing)"; exit 0'
+                    } else {
+                        echo "No recognized build file (pom.xml / build.gradle / package.json). Skipping automated build."
+                    }
+                }
+            }
+        }
+
+        stage('Run Tests (if any)') {
+            steps {
+                script {
+                    if (fileExists('pom.xml')) {
+                        echo "Running Maven tests..."
+                        bat 'mvn test'
+                    } else if (fileExists('build.gradle') || fileExists('gradlew')) {
+                        echo "Running Gradle tests..."
+                        if (fileExists('gradlew')) {
+                            bat '.\\gradlew test'
+                        } else {
+                            bat 'gradle test'
+                        }
+                    } else if (fileExists('package.json')) {
+                        echo "Running npm test (if defined)..."
+                        bat 'npm test || echo "npm test returned non-zero or not defined; continuing"'
+                    } else {
+                        echo "No test step for unknown project type."
+                    }
+                }
+            }
+        }
+
+        stage('Archive Artifacts & Test Reports') {
+            steps {
+                script {
+                    // Archive common artifact locations
+                    if (fileExists('target')) {
+                        stash includes: 'target/**', name: 'maven-target' // optional stash
+                        archiveArtifacts artifacts: 'target/**/*.jar, target/**/*.war', allowEmptyArchive: true
+                        // junit for maven surefire
+                        junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+                    }
+                    if (fileExists('build')) {
+                        archiveArtifacts artifacts: 'build/libs/**/*.jar', allowEmptyArchive: true
+                        junit allowEmptyResults: true, testResults: '**/build/test-results/**/*.xml'
+                    }
+                    if (fileExists('coverage') || fileExists('reports')) {
+                        archiveArtifacts artifacts: 'coverage/**, reports/**', allowEmptyArchive: true
+                    }
+                    if (fileExists('package.json')) {
+                        archiveArtifacts artifacts: 'dist/**, build/**', allowEmptyArchive: true
+                    }
+                }
+            }
+        }
+
+        stage('Deploy / Run Application (agent-level)') {
+            steps {
+                script {
+                    // Try to run built jar if present
+                    if (fileExists('target') && bat(returnStatus: true, script: 'dir target\\*.jar > nul 2>&1') == 0) {
+                        echo "Found jar in target/ — starting the jar (background)..."
+                        // start jar in background using PowerShell Start-Process (Windows-friendly)
+                        bat """
+                        powershell -Command ^
+                        \"$jar = Get-ChildItem -Path target -Filter *.jar | Select-Object -First 1; ^
+                        if ($jar) { ^
+                            Write-Host 'Starting:' $jar.FullName; ^
+                            # kill any process using the desired port (best-effort)
+                            try { $p = Get-NetTCPConnection -LocalPort ${APP_PORT} -ErrorAction SilentlyContinue ; if ($p) { $proc = Get-Process -Id $p.OwningProcess -ErrorAction SilentlyContinue; if ($proc) { $proc | Stop-Process -Force } } } catch { Write-Host 'port free/cleanup ignored' } ; ^
+                            Start-Process -FilePath 'java' -ArgumentList '-jar', $jar.FullName -NoNewWindow -PassThru | Out-Null; ^
+                            Write-Host 'Application started (check logs on agent).' ^
+                        } else { Write-Host 'No jar found to run.' }\" 
+                        """
+                    } else if (fileExists('build\\libs') && bat(returnStatus: true, script: 'dir build\\libs\\*.jar > nul 2>&1') == 0) {
+                        echo "Found jar in build/libs — starting the jar (background)..."
+                        bat """
+                        powershell -Command ^
+                        \"$jar = Get-ChildItem -Path build\\libs -Filter *.jar | Select-Object -First 1; ^
+                        if ($jar) { Start-Process -FilePath 'java' -ArgumentList '-jar', $jar.FullName -NoNewWindow -PassThru | Out-Null; Write-Host 'Started jar.' } else { Write-Host 'No jar found.' }\" 
+                        """
+                    } else if (fileExists('package.json') && (bat(returnStatus: true, script: 'type package.json | findstr /I /C:"\\"start\\""' ) == 0 || bat(returnStatus: true, script: 'type package.json | findstr /I /C:"serve"') == 0)) {
+                        echo "Starting Node app (npm start) in background..."
+                        // On Windows, use start to run in background
+                        bat 'start /B cmd /c "npm start > app.log 2>&1"'
+                        echo "npm start launched (output -> app.log)"
+                    } else {
+                        echo "No known deployable artifact found. Skipping auto-deploy."
+                    }
+                }
+            }
+        }
     }
 
-    stage('Deploy') {
-      steps {
-        bat """
-          echo === Deploy stage ===
-          setlocal
-
-          rem If a deploy.ps1 exists, run it (preferred).
-          if exist "%WORKSPACE%\\deploy.ps1" (
-            echo Found deploy.ps1 - invoking PowerShell
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%WORKSPACE%\\deploy.ps1" -Workspace "%WORKSPACE%" -Dest "${DEPLOY_DIR}"
-            if errorlevel 1 (
-              echo ERROR: deploy.ps1 failed
-              exit /b 2
-            )
-          ) else (
-            echo deploy.ps1 not found - using fallback batch copy
-            rem ensure destination exists
-            if not exist "${DEPLOY_DIR}" (
-              echo Destination ${DEPLOY_DIR} does not exist. Attempting to create.
-              mkdir "${DEPLOY_DIR}"
-              if errorlevel 1 (
-                echo ERROR: Unable to create destination ${DEPLOY_DIR}
-                exit /b 5
-              )
-            )
-
-            set COPY_ERROR=0
-
-            rem copy index.html
-            if exist "%WORKSPACE%\\index.html" (
-              echo Copying index.html -> ${DEPLOY_DIR}
-              xcopy /Y /Q "%WORKSPACE%\\index.html" "${DEPLOY_DIR}\\"
-              if errorlevel 1 set COPY_ERROR=1
-            ) else (
-              echo index.html not found in workspace
-            )
-
-            rem copy about.html
-            if exist "%WORKSPACE%\\about.html" (
-              echo Copying destination.html -> ${DEPLOY_DIR}
-              xcopy /Y /Q "%WORKSPACE%\\about.html" "${DEPLOY_DIR}\\"
-              if errorlevel 1 set COPY_ERROR=1
-            ) else (
-              echo about.html not found in workspace
-            )
-
-            rem copy assets folder recursively if present
-            if exist "%WORKSPACE%\\assets" (
-              echo Copying assets folder -> ${DEPLOY_DIR}\\assets
-              xcopy /E /I /Y /Q "%WORKSPACE%\\assets" "${DEPLOY_DIR}\\assets\\"
-              if errorlevel 1 set COPY_ERROR=1
-            ) else (
-              echo assets folder not present
-            )
-
-            rem fail if nothing was copied
-            if not exist "%WORKSPACE%\\index.html" if not exist "%WORKSPACE%\\about.html" if not exist "%WORKSPACE%\\assets" (
-              echo ERROR: No deployable artifacts found (index.html or about.html or assets/)
-              dir "%WORKSPACE%"
-              exit /b 4
-            )
-
-            if "%COPY_ERROR%"=="1" (
-              echo ERROR: one or more copy operations failed - check permissions for ${DEPLOY_DIR}
-              exit /b 3
-            )
-          )
-
-          echo === Deploy stage finished ===
-        """
-      }
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+        }
+        always {
+            echo 'Pipeline finished (always block).'
+        }
     }
-
-    stage('Verify HTTP (server-side)') {
-      steps {
-        bat """
-          echo Verifying http://localhost/index.html on Jenkins host
-          powershell -NoProfile -Command ^
-            "try { \$r = Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost/index.html' -TimeoutSec 10; Write-Output 'STATUS:' \$r.StatusCode; if (\$r.StatusCode -eq 200) { Write-Output 'Snippet:'; Write-Output \$r.Content.Substring(0,[Math]::Min(300,\$r.Content.Length)) } else { Write-Output 'Non-200 status returned'; exit 6 } } catch { Write-Output 'HTTP check failed:'; Write-Output \$_.Exception.Message; exit 6 }"
-        """
-      }
-    }
-  }
-
-  post {
-    success {
-      echo "Pipeline finished successfully. Visit: http://<jenkins-host-or-ip>/index.html"
-    }
-    failure {
-      echo "Pipeline failed — check the console log above. Common issues: credentials mismatch for checkout, missing files in workspace, or no write permission to ${DEPLOY_DIR}."
-    }
-  }
 }
