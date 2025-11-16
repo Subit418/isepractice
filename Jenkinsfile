@@ -2,19 +2,16 @@ pipeline {
   agent any
 
   environment {
-    // credentialsId must match the ID you set in Jenkins when adding username+password
-    GIT_CREDENTIALS = 'github-pat'
-    REPO_URL = 'https://github.com/Subit418/isepractice.git'
-    // adjust TARGET_DIR to the folder where your static server will read files
-    TARGET_DIR = "${env.WORKSPACE}/deployed-site" // default: deploy inside workspace (safe)
-    // Example for system-wide serving: Linux: /var/www/html/portfolio or Windows: C:\\portfolio_site
-    // TARGET_DIR = "/var/www/html/portfolio"
+    GIT_CREDENTIALS = 'github-pat'                // update if you used a different credentials ID
+    REPO_URL = 'https://github.com/Subit418/isepractice.git' // adjust
+    // Default TARGET_DIR for Windows example; adjust as needed
+    TARGET_DIR_WIN = 'C:\\portfolio_site'         // Windows target (adjust)
+    TARGET_DIR_UNIX = "${env.WORKSPACE}/deployed-site" // safe default for Unix
   }
 
   stages {
     stage('Checkout') {
       steps {
-        // Use usernamePassword credentials for HTTPS checkout
         checkout([$class: 'GitSCM',
           branches: [[name: '*/master']],
           userRemoteConfigs: [[
@@ -34,32 +31,33 @@ pipeline {
     stage('Deploy') {
       steps {
         script {
-          // create target dir
-          sh '''
-            set -e
-            rm -rf "$TARGET_DIR"
-            mkdir -p "$TARGET_DIR"
-            cp -r ./* "$TARGET_DIR"/
-            echo "Deployed to $TARGET_DIR"
-          '''.trim()
+          if (isUnix()) {
+            echo "Detected Unix agent. Deploying to ${env.TARGET_DIR_UNIX}"
+            sh """
+              set -e
+              rm -rf "${TARGET_DIR_UNIX}"
+              mkdir -p "${TARGET_DIR_UNIX}"
+              cp -r ./* "${TARGET_DIR_UNIX}/"
+              echo "Deployed to ${TARGET_DIR_UNIX}"
+            """
+          } else {
+            // Windows branch uses bat commands and proper escaping
+            def td = TARGET_DIR_WIN
+            echo "Detected Windows agent. Deploying to ${td}"
+            bat """
+              if exist "${td}" rmdir /s /q "${td}"
+              mkdir "${td}"
+              xcopy /E /I /Y "%WORKSPACE%\\*" "${td}\\\\"
+              echo Deployed to ${td}
+            """
+          }
         }
       }
-      // For Windows agent, use bat instead:
-      /*
-      steps {
-        bat """
-        if exist "%TARGET_DIR%" rmdir /s /q "%TARGET_DIR%"
-        mkdir "%TARGET_DIR%"
-        xcopy /E /I /Y * "%TARGET_DIR%\\"
-        echo Deployed to %TARGET_DIR%
-        """
-      }
-      */
     }
 
     stage('Post deploy (status)') {
       steps {
-        echo "Deployment finished. Serve the folder with a static server (see README)."
+        echo "Deployment finished. Check the TARGET_DIR for files."
       }
     }
   }
@@ -67,6 +65,7 @@ pipeline {
   post {
     always {
       archiveArtifacts artifacts: '**/*.html, **/*.css', fingerprint: true
+      echo "Archived HTML/CSS artifacts."
     }
   }
 }
