@@ -8,41 +8,39 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                echo 'Pulling website from GitHub...'
+                echo 'Cloning website repository...'
                 git url: 'https://github.com/Subit418/isepractice.git', branch: 'master'
             }
         }
 
         stage('Start Static Server') {
             steps {
-                echo "Starting static website on port ${APP_PORT}..."
+                echo "Preparing to serve static site on port %APP_PORT%..."
 
-                // Kill old process on that port (Windows only)
+                // Best-effort: stop any process listening on the port (Windows)
+                // then start python -m http.server in the background and redirect logs to serve.log
                 bat """
-                powershell -Command ^
-                "try { ^
-                    Get-NetTCPConnection -LocalPort ${APP_PORT} -ErrorAction SilentlyContinue | ^
-                    ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } ^
-                } catch {}"
-                """
+                echo Stopping any process listening on port %APP_PORT% (if present)...
+                for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%APP_PORT% ^| findstr LISTENING') do (
+                  echo Killing PID %%a
+                  taskkill /PID %%a /F > nul 2>&1 || echo failed to kill %%a
+                )
 
-                // Start python server in background
-                bat """
-                powershell -Command ^
-                "Start-Process python -ArgumentList '-m','http.server','${APP_PORT}' -WorkingDirectory '${WORKSPACE}' -WindowStyle Hidden"
+                echo Starting python HTTP server in background (logs -> serve.log)...
+                start "" /B cmd /c "python -m http.server %APP_PORT% > serve.log 2>&1"
+                echo Server started (background). Check serve.log in workspace for output.
                 """
-
-                echo "Server started! Open: http://<JENKINS-IP>:${APP_PORT}"
             }
         }
     }
 
     post {
         success {
-            echo "Website is running at: http://<JENKINS-IP>:${APP_PORT}"
+            echo "If Jenkins runs locally open: http://localhost:%APP_PORT%"
+            echo "If Jenkins runs on another machine open: http://<JENKINS-IP>:%APP_PORT%"
         }
         failure {
-            echo "Pipeline failed."
+            echo "Pipeline failed. Check console output."
         }
     }
 }
